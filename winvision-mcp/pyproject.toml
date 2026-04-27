@@ -1,0 +1,135 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "winvision-mcp"
+version = "1.0.0"
+description = "Windows 11 desktop automation and vision-LLM QA via MCP"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "zaxbysauce", email = "zaxbysauce@gmail.com" }]
+maintainers = [{ name = "zaxbysauce", email = "zaxbysauce@gmail.com" }]
+keywords = ["mcp", "windows", "automation", "uia", "vision", "qa"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+  "fastmcp>=2.13.0",
+  "mcp>=1.12.0",
+  "pywinauto>=0.6.9 ; sys_platform == 'win32'",
+  "uiautomation>=2.0.20 ; sys_platform == 'win32'",
+  "comtypes>=1.4.0 ; sys_platform == 'win32'",
+  "pywin32>=306 ; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Capture>=2.0 ; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.DirectX>=2.0 ; sys_platform == 'win32'",
+  "winrt-Windows.UI.Composition>=2.0 ; sys_platform == 'win32'",
+  # The Python winrt projection above ships the WGC runtime classes but does
+  # NOT expose IGraphicsCaptureItemInterop, which is required to construct a
+  # GraphicsCaptureItem from an HWND/HMONITOR. windows-capture is the Rust-
+  # backed binding that bridges that gap with pre-built wheels and is what
+  # we actually drive in capture/wgc_backend.py.
+  "windows-capture>=1.5,<3 ; sys_platform == 'win32'",
+  "mss>=9.0.2",
+  "Pillow>=10.4.0",
+  "numpy>=1.26.0",
+  "opencv-python-headless>=4.10.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+  "structlog>=24.4.0",
+  "rich>=13.7.0",
+  "typer>=0.12.0",
+  "aiosqlite>=0.20.0",
+  "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[project.scripts]
+winvision-mcp = "winvision_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/zaxbysauce/zaxbyuia/tree/main/winvision-mcp"
+Repository = "https://github.com/zaxbysauce/zaxbyuia"
+Issues = "https://github.com/zaxbysauce/zaxbyuia/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/winvision_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF", "SIM", "PT"]
+ignore = [
+  "E501",   # line length
+  "B008",   # function calls in defaults (Pydantic Field uses these intentionally)
+  "B904",   # raise from inside except (we already do this where it matters)
+  "B905",   # zip strict=
+  "RUF002", # ambiguous unicode in docstrings (we use en-dashes deliberately)
+  "RUF012", # mutable class default (ctypes _fields_)
+  "RUF046", # int(...) on an int
+  "RUF059", # unused unpacked variable
+  "SIM103", # return negated
+  "SIM105", # contextlib.suppress
+  "SIM108", # ternary
+  "F841",   # unused locals (some test scaffolding)
+  "B007",   # unused loop variable
+  "F401",   # unused import (some lazy-import probes)
+  "PT018",  # split asserts
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "F841", "PT018"]
+"scripts/*" = ["PT018"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = false
+files = ["src/winvision_mcp"]
+# Capture, UIA, and QA modules sit on top of dynamic COM/winrt projections
+# that have no published type stubs. We keep mypy turned on for them but in
+# non-strict mode — strict would force `Any` annotations everywhere we touch
+# `uiautomation` controls or winrt `IDirect3DSurface` objects, which adds noise
+# without catching real bugs.
+disable_error_code = ["unused-ignore", "attr-defined", "union-attr", "assignment", "no-redef", "index", "call-arg"]
+
+[[tool.mypy.overrides]]
+module = [
+  "uiautomation.*",
+  "pywinauto.*",
+  "comtypes.*",
+  "win32api",
+  "win32con",
+  "win32gui",
+  "win32process",
+  "win32ui",
+  "win32clipboard",
+  "winrt.*",
+  "mss.*",
+  "cv2",
+  "psutil",
+  "pytesseract",
+  "windows_capture",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

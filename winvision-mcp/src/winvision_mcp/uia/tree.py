@@ -15,6 +15,7 @@ import sys
 from typing import Any
 
 from ..models import ElementInfo, Rect
+from .budget import WalkBudget
 
 # UIA control types we treat as "interactable" for filter_types and
 # screenshot_annotated. Other types are still walkable but not numbered.
@@ -53,9 +54,14 @@ def get_root() -> Any:
 
 
 def get_window_control(title: str | None, *, exact: bool = False) -> Any | None:
-    """Find a top-level window by title (regex unless ``exact``).
+    """Find a top-level window by title.
 
-    Returns ``None`` if no matching window is found within the search horizon.
+    With ``exact=True``, performs a strict ``==`` match. Otherwise, attempts a
+    regex search; if the supplied ``title`` does not compile as a regex (real
+    titles routinely contain ``[]``, ``+``, ``*``, ``\\``, ``(``, etc., e.g.
+    ``"*new 3 - Notepad++ [Administrator]"``), falls back to a literal
+    substring match so the call still works. Returns ``None`` if no matching
+    top-level window is found.
     """
     _require_win()
     import re
@@ -74,7 +80,15 @@ def get_window_control(title: str | None, *, exact: bool = False) -> Any | None:
             cur = parent
         return cur
 
-    pattern = re.compile(title) if not exact else None
+    pattern: re.Pattern[str] | None = None
+    if not exact:
+        try:
+            pattern = re.compile(title)
+        except re.error:
+            # title contained regex metachars that don't compile (very common
+            # for real window titles); fall through to literal substring match.
+            pattern = None
+
     root = auto.GetRootControl()
     for child in root.GetChildren():
         try:
@@ -84,8 +98,11 @@ def get_window_control(title: str | None, *, exact: bool = False) -> Any | None:
         if exact:
             if name == title:
                 return child
-        else:
-            if pattern and pattern.search(name):
+        elif pattern is not None:
+            if pattern.search(name):
+                return child
+        else:  # regex compile failed — substring match
+            if title in name:
                 return child
     return None
 
@@ -171,6 +188,7 @@ def serialize_tree(
     visible_only: bool = True,
     interactable_only: bool = False,
     max_nodes: int = 500,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Serialize a UIA subtree to a JSON-friendly dict.
 
@@ -181,15 +199,24 @@ def serialize_tree(
         interactable_only: only emit controls whose type is in
             :data:`INTERACTABLE_TYPES`.
         max_nodes: hard cap on total nodes; truncated subtrees are marked.
+        timeout_s: wall-clock budget for the walk. Defaults to
+            ``settings.uia_walk_timeout_s``. When the budget expires we return
+            what we have so far with ``truncated_by_time=True``.
 
     Returns:
-        ``{"root": {...}, "truncated": bool, "total_nodes": int}``.
+        ``{"root": {...}, "truncated": bool, "truncated_by_time": bool,
+        "total_nodes": int}``.
     """
-    counter = {"n": 0, "truncated": False}
+    counter = {"n": 0, "truncated": False, "by_time": False}
+    budget = WalkBudget(timeout_s)
 
     def walk(ctrl: Any, d: int) -> dict[str, Any] | None:
         if counter["n"] >= max_nodes:
             counter["truncated"] = True
+            return None
+        if budget.expired():
+            counter["truncated"] = True
+            counter["by_time"] = True
             return None
         if visible_only and bool(getattr(ctrl, "IsOffscreen", False)):
             return None
@@ -222,12 +249,21 @@ def serialize_tree(
                     if counter["n"] >= max_nodes:
                         counter["truncated"] = True
                         break
+                    if budget.expired():
+                        counter["truncated"] = True
+                        counter["by_time"] = True
+                        break
             except Exception:
                 pass
         return node
 
     root = walk(root_ctrl, 0)
-    return {"root": root, "truncated": counter["truncated"], "total_nodes": counter["n"]}
+    return {
+        "root": root,
+        "truncated": counter["truncated"],
+        "truncated_by_time": counter["by_time"],
+        "total_nodes": counter["n"],
+    }
 
 
 def render_text_tree(root_ctrl: Any, *, depth: int = 6, max_lines: int = 400) -> str:

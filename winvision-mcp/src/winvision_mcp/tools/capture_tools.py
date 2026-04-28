@@ -128,12 +128,32 @@ def register(mcp: Any) -> None:
                 message="screenshot_annotated requires Windows",
             ).model_dump()
 
+        from ..uia.budget import WalkBudget
         from ..uia.tree import INTERACTABLE_TYPES, get_window_control
 
         with tool_telemetry(
             "screenshot_annotated",
             {"window_title": window_title, "filter_types": filter_types, "max_elements": max_elements},
         ):
+            # Refuse to silently default to "the foreground window" when the
+            # foreground belongs to the MCP host (opencode / Claude Desktop /
+            # VS Code / Cursor / a terminal). Walking those windows' giant
+            # accessibility trees is what timed out the client and severed the
+            # stdio connection in real-world usage.
+            if window_title is None:
+                fg_proc = _foreground_process_name()
+                ide_set = {p.lower() for p in get_settings().ide_host_processes}
+                if fg_proc and fg_proc.lower() in ide_set:
+                    return ToolError(
+                        error="ide_foreground_refused",
+                        message=(
+                            f"refusing to walk foreground window owned by '{fg_proc}'. "
+                            "Pass window_title or window_title_regex explicitly to target "
+                            "the app you actually want to inspect."
+                        ),
+                        details={"foreground_process": fg_proc},
+                    ).model_dump()
+
             win = get_window_control(window_title)
             if win is None:
                 return ToolError(error="not_found", message="no matching window").model_dump()
@@ -150,10 +170,18 @@ def register(mcp: Any) -> None:
                 set(filter_types) if filter_types else set(INTERACTABLE_TYPES)
             )
 
-            # Walk the window's UIA subtree to gather candidates.
+            # Walk the window's UIA subtree to gather candidates, bounded by
+            # both element count AND a wall-clock budget — accessibility-rich
+            # apps (Office, VS Code, Chrome with the inspector enabled) can
+            # otherwise outlast the MCP client's timeout and sever stdio.
+            budget = WalkBudget()
+            truncated_by_time = False
             candidates: list[tuple[Any, Any]] = []  # (control, info)
             stack = [win]
             while stack and len(candidates) < max_elements * 4:
+                if budget.expired():
+                    truncated_by_time = True
+                    break
                 ctrl = stack.pop()
                 try:
                     info = control_to_info(ctrl)
@@ -192,12 +220,16 @@ def register(mcp: Any) -> None:
             annotated = cap.downsample_to_max_edge(annotated)
 
             mcp_img = to_mcp_image(annotated, persist_name="annotated_latest")
-            return {"image": mcp_img, "legend": legend_full,
-                    "result": AnnotatedResult(
-                        width=annotated.size[0], height=annotated.size[1],
-                        legend={k: info for k, info in zip(legend_full.keys(), [c[1] for c in candidates])},
-                        image_path=str(get_settings().screenshots_dir / "annotated_latest.png"),
-                    ).model_dump()}
+            return {
+                "image": mcp_img,
+                "legend": legend_full,
+                "truncated_by_time": truncated_by_time,
+                "result": AnnotatedResult(
+                    width=annotated.size[0], height=annotated.size[1],
+                    legend={k: info for k, info in zip(legend_full.keys(), [c[1] for c in candidates])},
+                    image_path=str(get_settings().screenshots_dir / "annotated_latest.png"),
+                ).model_dump(),
+            }
 
     @mcp.tool
     def tile_screenshot(
@@ -256,3 +288,31 @@ def register(mcp: Any) -> None:
         ImageResult,
         Rect,
     )
+
+
+def _foreground_process_name() -> str:
+    """Return the basename (e.g. ``Code.exe``) of the foreground window's process.
+
+    Empty string on non-Windows or if the lookup fails — callers should treat
+    that as "not an IDE" so we don't false-positive into refusing real apps.
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+
+        import psutil  # type: ignore[import-not-found]
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        return psutil.Process(int(pid.value)).name()
+    except Exception:
+        return ""

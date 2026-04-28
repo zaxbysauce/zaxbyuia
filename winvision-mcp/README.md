@@ -293,6 +293,7 @@ window_titles = ["MyApp", "Calculator", "Notepad"]
 | `WINVISION_CAPTURE_MAX_EDGE` | `1600` | Downsample longest edge to this many px. |
 | `WINVISION_INPUT_SETTLE_MS` | `50` | Sleep after focus before sending input. |
 | `WINVISION_LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR. |
+| `WINVISION_UIA_WALK_TIMEOUT_S` | `8.0` | Wall-clock cap on any single UIA tree walk. Prevents accessibility-rich apps (VS Code, Office) from outliving the MCP client's request timeout. |
 | `WINVISION_HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport. |
 | `WINVISION_HTTP_PORT` | `8787` | Bind port for HTTP transport. |
 
@@ -305,8 +306,11 @@ window_titles = ["MyApp", "Calculator", "Notepad"]
 | Clicks land at the wrong pixel on a multi-monitor setup | The process isn't per-monitor-DPI-aware | We call `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` at startup; if you're running via a wrapper that ignores manifest hints, embed `manifest/winvision.manifest` (`<dpiAwareness>PerMonitorV2</dpiAwareness>`). |
 | `focus_window` returns success but the window doesn't come forward | Target window has higher integrity than the server | Run `scripts/sign_and_install.ps1` and use the UIAccess binary from `C:\Program Files\WinVision\`. |
 | Chromium / Electron windows return all-black screenshots | PrintWindow can't capture GPU-composited DWM surfaces | This is exactly why we use WGC by default (via the `windows-capture` Rust-backed binding). If you see this anyway, run `winvision-mcp doctor` to confirm WGC is enabled, and check `pip show windows-capture`. WGC requires Windows 10 1903+. |
+| `get_ui_tree` returns one `region` node with no children for an Electron / Chromium / Skia / Flutter app | The app doesn't expose accessibility properties via UIA | Drop one rung: use `screenshot_window` (WGC handles these correctly) + the vision LLM to identify targets visually + `click_at(x, y)` + `assert_visual` for verdicts. UIA-based tools (`find_elements`, `invoke_element`) cannot help here — there are literally no accessible elements. |
 | `get_ui_tree` for a WinForms app returns 2-3 nodes | Some legacy WinForms apps don't expose UIA reflection by default | Try driving them with WinAppDriver as a fallback (see `scripts/install_wad.ps1`), or set `backend="win32"` in pywinauto-direct flows. |
+| First tool call after starting opencode times out (`MCP error -32001: Request timed out`), then every subsequent winvision tool returns `Not connected` | Your MCP client (opencode/Claude Desktop) severed the stdio session after the timeout. There is no in-session reconnect for stdio MCP — once severed it stays severed. | (1) Restart the MCP client. (2) Bump the client `timeout` to ≥ 60000 ms. (3) Always pass an explicit `window_title` / `window_title_regex` to `screenshot_annotated` — never let it default to "the foreground window," because the foreground when you're chatting *is* the MCP client. As of v1.0.1 the server refuses to walk known IDE/terminal foregrounds and every UIA walk is wall-clock-bounded by `WINVISION_UIA_WALK_TIMEOUT_S` (default 8 s). |
 | `assert_visual` returns `passed=false` with `"sampling unavailable"` | Your MCP client doesn't support sampling | Use `assert_element_visible` / `assert_text_present` / `baseline_compare` for structural / visual-regression checks instead. |
+| `screenshot_annotated` returns `error=ide_foreground_refused` | You called it with no `window_title` while opencode/Claude Desktop/VS Code/Terminal was the foreground window. Walking those is what timed out earlier versions. | Pass `window_title` (exact title) or `window_title_regex` (regex). E.g. `{"window_title_regex": "^OpMed CDP$"}`. |
 
 ---
 

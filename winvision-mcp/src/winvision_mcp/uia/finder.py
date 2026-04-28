@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from ..models import ElementInfo, ElementQuery, ElementRef
+from .budget import WalkBudget
 from .cache import get_cache
 from .tree import control_to_info, get_window_control
 
@@ -31,13 +32,30 @@ def _matches(ctrl: Any, q: ElementQuery, info: ElementInfo) -> bool:
     return True
 
 
-def _walk(ctrl: Any, depth: int, max_depth: int = 32) -> list[Any]:
+def _walk(
+    ctrl: Any,
+    depth: int,
+    max_depth: int = 32,
+    *,
+    budget: WalkBudget | None = None,
+) -> list[Any]:
+    """Flatten a UIA subtree (depth-first), bounded by ``max_depth`` AND ``budget``.
+
+    ``budget`` is honored cooperatively: each iteration checks if the wall-clock
+    budget is exhausted and stops descending if so, returning whatever has been
+    collected so far. The caller is responsible for noticing the truncation
+    (typically by comparing ``len(result)`` to the requested ``limit``).
+    """
     out = [ctrl]
     if depth >= max_depth:
         return out
+    if budget is not None and budget.expired():
+        return out
     try:
         for c in ctrl.GetChildren():
-            out.extend(_walk(c, depth + 1, max_depth))
+            if budget is not None and budget.expired():
+                break
+            out.extend(_walk(c, depth + 1, max_depth, budget=budget))
     except Exception:
         pass
     return out
@@ -57,9 +75,13 @@ def find_elements(query: ElementQuery, *, limit: int = 50) -> list[tuple[Any, El
     _require_win()
 
     # Restrict starting scope to a window if requested.
+    # ``query.window_title`` is treated as a literal title (exact match);
+    # ``query.window_title_regex`` is the regex variant. Splitting the two
+    # avoids regex-metachar surprises in real titles like
+    # "*Untitled - Notepad++ [Administrator]".
     scope: list[Any]
     if query.window_title is not None:
-        win = get_window_control(query.window_title)
+        win = get_window_control(query.window_title, exact=True)
         if win is None:
             return []
         scope = [win]
@@ -76,6 +98,7 @@ def find_elements(query: ElementQuery, *, limit: int = 50) -> list[tuple[Any, El
 
     cache = get_cache()
     results: list[tuple[Any, ElementInfo, str]] = []
+    budget = WalkBudget()
 
     # Optional descendant filter (element must be within ancestor_automation_id).
     if query.ancestor_automation_id:
@@ -89,7 +112,11 @@ def find_elements(query: ElementQuery, *, limit: int = 50) -> list[tuple[Any, El
         scope = new_scope or scope
 
     for s in scope:
-        for ctrl in _walk(s, 0):
+        if budget.expired():
+            break
+        for ctrl in _walk(s, 0, budget=budget):
+            if budget.expired():
+                break
             try:
                 info = control_to_info(ctrl)
             except Exception:

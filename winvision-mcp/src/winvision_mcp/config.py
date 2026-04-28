@@ -87,6 +87,43 @@ class Settings(BaseSettings):
     input_settle_ms: int = Field(50, description="Sleep after focusing before sending input.")
     default_action_timeout_s: float = Field(10.0)
 
+    # --- UIA walk safety -----------------------------------------------------
+    # Hard wall-clock cap on any single UIA tree walk. Targets like VS Code or
+    # Office expose 5k-10k accessible elements; without this guard a walk can
+    # easily exceed the MCP client's 30s default timeout and the client will
+    # sever the stdio connection (every subsequent tool call returns "Not
+    # connected" until the user restarts opencode/Claude Desktop). 8s is well
+    # under any reasonable client timeout and forces noisy targets to truncate
+    # gracefully rather than hang.
+    uia_walk_timeout_s: float = Field(
+        8.0,
+        gt=0.0,
+        le=60.0,
+        description="Max seconds any single UIA tree walk may consume.",
+    )
+
+    # Process names of MCP-host IDEs/terminals. screenshot_annotated refuses
+    # to default to the foreground window when the foreground process matches
+    # one of these — otherwise we'd walk the host IDE's giant accessibility
+    # tree and time out the client.
+    ide_host_processes: list[str] = Field(
+        default_factory=lambda: [
+            "code.exe",
+            "Code.exe",
+            "Cursor.exe",
+            "WindowsTerminal.exe",
+            "windowsterminal.exe",
+            "wt.exe",
+            "powershell.exe",
+            "pwsh.exe",
+            "cmd.exe",
+            "OpenConsole.exe",
+            "opencode.exe",
+            "claude.exe",
+            "Claude.exe",
+        ]
+    )
+
     # --- security ------------------------------------------------------------
     allowlist_mode: AllowlistMode = Field("permissive_with_confirm")
     allowlist_processes: list[str] = Field(default_factory=list)

@@ -40,6 +40,7 @@ def build_mcp(*, transport: str = "stdio") -> Any:
     settings = get_settings()
     configure_logging(level=settings.log_level, transport=transport)
     init_db()
+    _prewarm_heavy_imports()
 
     if settings.allowlist_mode == "off":
         logger.warning(
@@ -57,6 +58,42 @@ def build_mcp(*, transport: str = "stdio") -> Any:
     _set_singleton(mcp)
     logger.info("mcp_ready", transport=transport, data_dir=str(settings.data_dir))
     return mcp
+
+
+def _prewarm_heavy_imports() -> None:
+    """Eagerly import the slow modules so the FIRST tool call doesn't pay
+    for them under the MCP client's request timeout.
+
+    Without this, the first ``screenshot_*`` or ``find_elements`` call has to
+    import ``windows_capture`` (which transitively imports ``cv2`` and
+    ``numpy`` — collectively ~500 MB and 1-3 s on cold disk), bring up the
+    UIA COM, and load the Pillow font cache. On a cold-start client with a
+    30 s timeout, that can blow the budget on the very first call.
+
+    We swallow all import errors here — non-Windows hosts and slimmed-down
+    environments should still build the MCP and serve every cross-platform
+    tool we expose.
+    """
+    import sys
+    import time
+
+    t0 = time.monotonic()
+    try:
+        import numpy
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover
+        logger.debug("prewarm_pillow_numpy_failed", err=str(exc))
+
+    if sys.platform == "win32":
+        try:
+            import uiautomation
+        except Exception as exc:  # pragma: no cover
+            logger.debug("prewarm_uiautomation_failed", err=str(exc))
+        try:
+            import windows_capture
+        except Exception as exc:
+            logger.debug("prewarm_windows_capture_failed", err=str(exc))
+    logger.debug("prewarm_done", duration_ms=int((time.monotonic() - t0) * 1000))
 
 
 _singleton: Any = None
